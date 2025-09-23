@@ -26,5 +26,8 @@ Environment variables (set in .env):
 
 Run locally:
 - Install dependencies: pip install -r fastapi_backend/requirements.txt
-- Start server: uvicorn src.api.main:app --reload --app-dir fastapi_backend/src
+- Start server (option 1): python fastapi_backend/run_server.py
+  - This binds to 0.0.0.0:3001 by default (configurable via HOST/PORT env vars)
+- Start server (option 2): uvicorn src.api.main:app --reload --app-dir fastapi_backend/src --host 0.0.0.0 --port 3001
 - Generate OpenAPI file: python -m src.api.generate_openapi
+- See fastapi_backend/.env.example for the environment variables. In production, set JWT_SECRET_KEY and POSTGRES_URL appropriately.
