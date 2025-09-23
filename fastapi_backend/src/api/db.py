@@ -24,14 +24,38 @@ class Base(DeclarativeBase):
 # Configure async engine and session maker
 _settings = get_settings()
 
+def _normalize_async_dsn(url: str | None) -> str:
+    """
+    Ensure the SQLAlchemy URL uses async drivers.
+
+    - For PostgreSQL: enforce postgresql+asyncpg://
+    - For SQLite: enforce sqlite+aiosqlite://
+    - If no URL is provided, fallback to local sqlite+aiosqlite dev DB.
+    """
+    if not url or not url.strip():
+        return "sqlite+aiosqlite:///./dev.db"
+
+    u = url.strip()
+
+    # Normalize common postgres prefixes to asyncpg
+    # Support both 'postgresql://' and 'postgres://'
+    if u.startswith("postgresql://"):
+        u = "postgresql+asyncpg://" + u[len("postgresql://"):]
+    elif u.startswith("postgres://"):
+        u = "postgresql+asyncpg://" + u[len("postgres://"):]
+
+    # Normalize sqlite URLs to aiosqlite
+    if u.startswith("sqlite://") and not u.startswith("sqlite+aiosqlite://"):
+        u = "sqlite+aiosqlite://" + u[len("sqlite://"):]
+
+    return u
+
 # Expect POSTGRES_URL in asyncpg form, e.g. postgresql+asyncpg://user:pass@host:5432/db
-if not _settings.POSTGRES_URL:
-    # For local dev fallback you can define POSTGRES_URL in .env
-    # NOTE: We do not hardcode credentials here by design.
-    pass
+# If a non-async DSN is provided, normalize it to the appropriate async driver.
+_normalized_url = _normalize_async_dsn(_settings.POSTGRES_URL)
 
 engine: AsyncEngine = create_async_engine(
-    _settings.POSTGRES_URL or "sqlite+aiosqlite:///./dev.db",
+    _normalized_url,
     echo=False,
     future=True,
 )
