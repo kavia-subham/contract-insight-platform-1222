@@ -3,13 +3,9 @@ import os
 
 from src.api.main import app
 
-# Get the OpenAPI schema
-openapi_schema = app.openapi()
+# Generate and persist OpenAPI schema reflecting latest routers and models
+schema = app.openapi()
 
-# Write to file
-output_dir = "interfaces"
-os.makedirs(output_dir, exist_ok=True)
-output_path = os.path.join(output_dir, "openapi.json")
-
-with open(output_path, "w") as f:
-    json.dump(openapi_schema, f, indent=2)
+os.makedirs("interfaces", exist_ok=True)
+with open(os.path.join("interfaces", "openapi.json"), "w") as f:
+    json.dump(schema, f, indent=2)
