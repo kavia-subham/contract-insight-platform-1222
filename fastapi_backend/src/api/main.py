@@ -1,9 +1,10 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import status
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 import uuid
+from datetime import datetime, timedelta
 
 from .services.pdf_processing import extract_text_from_pdf_bytes
 from .services.openai_client import analyze_contract_text_with_openai
@@ -15,6 +16,7 @@ app = FastAPI(
     openapi_tags=[
         {"name": "Health", "description": "Health and monitoring endpoints"},
         {"name": "Contracts", "description": "Contract upload and AI analysis"},
+        {"name": "Deadlines", "description": "Upcoming deadlines and reminders"},
     ],
 )
 
@@ -29,6 +31,10 @@ app.add_middleware(
 # Simple in-memory store for demo purposes. Replace with DB layer using PostgreSQL later.
 # Keyed by contract_id (UUID). Values contain filename, text, insights, created_by, etc.
 CONTRACT_ANALYSIS_STORE: Dict[str, Dict[str, Any]] = {}
+
+# In-memory cache of deadlines for demo purposes. In DB world, these would be
+# rows in a deadlines table with fields (id, contract_id, title, due_date, note).
+DEADLINES_STORE: List[Dict[str, Any]] = []
 
 
 # PUBLIC_INTERFACE
@@ -76,6 +82,20 @@ class ContractDetail(BaseModel):
     filename: str = Field(..., description="Original uploaded filename.")
     text: str = Field(..., description="Full extracted text of the contract.")
     insights: Optional[str] = Field(None, description="Insights JSON returned by OpenAI as a string.")
+
+
+class ContractInsights(BaseModel):
+    """Insights payload for a single contract."""
+    contract_id: str = Field(..., description="Unique identifier for the contract.")
+    insights: Optional[str] = Field(None, description="Insights JSON returned by OpenAI as a string.")
+
+
+class DeadlineItem(BaseModel):
+    """Model representing an upcoming deadline item."""
+    contract_id: str = Field(..., description="Contract ID associated with this deadline")
+    title: str = Field(..., description="Short title or type of the deadline")
+    due_date: datetime = Field(..., description="Due date/time in ISO 8601 format")
+    note: Optional[str] = Field(None, description="Optional note or context for the deadline")
 
 
 @app.get("/", tags=["Health"], summary="Health Check", response_description="API status")
@@ -216,9 +236,112 @@ async def upload_and_analyze_contract(file: UploadFile = File(...), token: Optio
         # Potentially add 'created_by' from token claims when validation is implemented
     }
 
+    # Naive demo deadline extraction: create placeholder deadlines if "termination" or "payment" appear
+    demo_deadlines: List[Dict[str, Any]] = []
+    now = datetime.utcnow()
+    text_lower = (extracted_text or "").lower()
+    if "termination" in text_lower:
+        demo_deadlines.append({
+            "contract_id": contract_id,
+            "title": "Termination Review",
+            "due_date": now + timedelta(days=30),
+            "note": "Review termination clauses and notice periods."
+        })
+    if "payment" in text_lower:
+        demo_deadlines.append({
+            "contract_id": contract_id,
+            "title": "Payment Due",
+            "due_date": now + timedelta(days=15),
+            "note": "First payment milestone based on contract terms."
+        })
+    # Store demo deadlines
+    DEADLINES_STORE.extend(demo_deadlines)
+
     return AnalysisResponse(
         contract_id=contract_id,
         text_preview=extracted_text[:400],
         insights=insights,
         message="Analysis completed",
     )
+
+
+# PUBLIC_INTERFACE
+@app.get(
+    "/contracts/{contract_id}/insights",
+    tags=["Contracts"],
+    summary="Get contract insights",
+    description="Returns the extracted insights for the specified contract as a JSON string.",
+    response_model=ContractInsights,
+    status_code=status.HTTP_200_OK,
+)
+async def get_contract_insights(
+    contract_id: str = Path(..., description="The contract identifier."),
+    token: Optional[str] = Depends(supabase_jwt_validator),
+):
+    """Retrieve extracted insights for a specific contract.
+
+    Args:
+        contract_id: The contract identifier.
+
+    Returns:
+        ContractInsights: The insights JSON (as a string) for the contract.
+
+    Errors:
+        404: If the contract is not found.
+    """
+    record = CONTRACT_ANALYSIS_STORE.get(contract_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found.")
+    return ContractInsights(contract_id=contract_id, insights=record.get("insights"))
+
+
+# PUBLIC_INTERFACE
+@app.get(
+    "/deadlines/upcoming",
+    tags=["Deadlines"],
+    summary="Get upcoming deadlines",
+    description="Returns all deadlines due within the next N days. Defaults to 7 days if not specified.",
+    response_model=List[DeadlineItem],
+    status_code=status.HTTP_200_OK,
+)
+async def get_upcoming_deadlines(
+    days: int = Query(7, ge=1, le=365, description="Number of days ahead to include"),
+    token: Optional[str] = Depends(supabase_jwt_validator),
+):
+    """Retrieve upcoming deadlines occurring within the next N days.
+
+    Args:
+        days: Window, in days from now, within which to return deadlines (1-365).
+
+    Returns:
+        A list of DeadlineItem objects sorted by due_date ascending.
+    """
+    now = datetime.utcnow()
+    end = now + timedelta(days=days)
+    results: List[DeadlineItem] = []
+    for d in DEADLINES_STORE:
+        due = d.get("due_date")
+        # Ensure 'due_date' is a datetime; if stored as str, attempt parse
+        if isinstance(due, str):
+            try:
+                due_dt = datetime.fromisoformat(due)
+            except Exception:
+                continue
+        else:
+            due_dt = due
+
+        if not isinstance(due_dt, datetime):
+            continue
+
+        if now <= due_dt <= end:
+            results.append(
+                DeadlineItem(
+                    contract_id=d.get("contract_id", ""),
+                    title=d.get("title", ""),
+                    due_date=due_dt,
+                    note=d.get("note"),
+                )
+            )
+    # Sort by due_date ascending
+    results.sort(key=lambda x: x.due_date)
+    return results
